@@ -170,13 +170,12 @@ def eval_expression(expression, var_map, q):
     return result
 
 
-@partial(jax.jit, static_argnames=['expression', 'q', 'num_rounds'])
 def sumcheck_32(eval_tables, *, q, expression, challenges, num_rounds):
     keys = list(eval_tables.keys())
     tables = {k: eval_tables[k].copy() for k in keys}
     
-    # determine degree from expression: max term length
     degree = max(len(term) for term in expression)
+    t_vals = jnp.arange(degree + 1, dtype=jnp.uint32)
     
     all_round_evals = []
     claimed_sum = None
@@ -185,30 +184,22 @@ def sumcheck_32(eval_tables, *, q, expression, challenges, num_rounds):
         z_map = {k: tables[k][0::2] for k in keys}
         o_map = {k: tables[k][1::2] for k in keys}
         
-        # compute g(0) and g(1)
-        g0 = jnp.sum(eval_expression(expression, z_map, q).astype(jnp.uint64)) % q
-        g1 = jnp.sum(eval_expression(expression, o_map, q).astype(jnp.uint64)) % q
+        def eval_at_t(t):
+            t_map = {k: mle_update_32(z_map[k], o_map[k], t, q=q) for k in keys}
+            return jnp.sum(eval_expression(expression, t_map, q).astype(jnp.uint64)) % q
         
-        round_evals = [g0, g1]
-        
-        # for degree > 1, compute g(2), g(3), ... g(degree)
-        for t in range(2, degree + 1):
-            t_val = jnp.uint32(t)
-            t_map = {k: mle_update_32(z_map[k], o_map[k], t_val, q=q) for k in keys}
-            gt = jnp.sum(eval_expression(expression, t_map, q).astype(jnp.uint64)) % q
-            round_evals.append(gt)
+        round_evals = jax.vmap(eval_at_t)(t_vals)  # shape (degree+1,)
         
         if round_idx == 0:
-            claimed_sum = (g0 + g1) % q
+            claimed_sum = (round_evals[0] + round_evals[1]) % q
         
-        all_round_evals.append(jnp.array(round_evals, dtype=jnp.uint64))
+        all_round_evals.append(round_evals)
         
         r = jnp.uint32(challenges[round_idx])
         for k in keys:
             tables[k] = mle_update_32(z_map[k], o_map[k], r, q=q)
     
-    round_evals = jnp.stack(all_round_evals)
-    return claimed_sum, round_evals
+    return claimed_sum, jnp.stack(all_round_evals)
 
 
 # def sumcheck_64(eval_tables, *, q, expression, challenges, num_rounds):
@@ -225,8 +216,8 @@ def sumcheck_32(eval_tables, *, q, expression, challenges, num_rounds):
 
 def sumcheck(eval_tables, *, q, expression, challenges, num_rounds, bit_width=32):
     """Frozen dispatcher entrypoint used by the harness."""
-    expression = tuple(tuple(term) for term in expression)
-    q = int(q)
+    # expression = tuple(tuple(term) for term in expression)
+    # q = int(q)
     
     if int(bit_width) == 32:
         return sumcheck_32(
