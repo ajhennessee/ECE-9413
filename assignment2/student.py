@@ -170,7 +170,7 @@ def eval_expression(expression, var_map, q):
     return result
 
 
-# @partial(jax.jit, static_argnames=['expression', 'q', 'num_rounds'])
+@partial(jax.jit, static_argnames=['expression', 'q', 'num_rounds'])
 def sumcheck_32(eval_tables, *, q, expression, challenges, num_rounds):
     keys = list(eval_tables.keys())
     tables = {k: eval_tables[k].copy() for k in keys}
@@ -225,8 +225,8 @@ def sumcheck_32(eval_tables, *, q, expression, challenges, num_rounds):
 
 def sumcheck(eval_tables, *, q, expression, challenges, num_rounds, bit_width=32):
     """Frozen dispatcher entrypoint used by the harness."""
-    # expression = tuple(tuple(term) for term in expression)
-    # q = int(q)
+    expression = tuple(tuple(term) for term in expression)
+    q = int(q)
     
     if int(bit_width) == 32:
         return sumcheck_32(
