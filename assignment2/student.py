@@ -147,33 +147,34 @@ def mle_update(zero_eval, one_eval, target_eval, *, q, bit_width=32):
     raise ValueError(f"Unsupported bit_width={bit_width}")
 
 
-def eval_expression(expression, var_map, q):
+def eval_expression(expression, t_stack, keys, q):
     """
-    expression is a list of lists e.g. [['a','b'], ['c']] meaning a*b + c
-    var_map is a dict mapping variable name to array
+    expression: tuple of tuples e.g. (('a','b'), ('c',))
+    t_stack: shape (num_tables, half) — stacked arrays
+    keys: list mapping index to variable name
     """
+    key_to_idx = {k: i for i, k in enumerate(keys)}
+    
     result = None
     for term in expression:
-        # multiply all variables in this term together
         term_val = None
         for var in term:
-            arr = var_map[var]
+            arr = t_stack[key_to_idx[var]].astype(jnp.uint64)
             if term_val is None:
                 term_val = arr
             else:
-                term_val = mod_mul_32(term_val, arr, q)
-        # add this term to the running total
-        if result is None:
-            result = term_val
-        else:
-            result = mod_add_32(result, term_val, q)
+                term_val = (term_val * arr) % q
+        result = term_val if result is None else (result + term_val) % q
+    
     return result
 
 
 @partial(jax.jit, static_argnames=['expression', 'q', 'num_rounds'])
 def sumcheck_32(eval_tables, *, q, expression, challenges, num_rounds):
     keys = list(eval_tables.keys())
-    tables = {k: eval_tables[k].copy() for k in keys}
+    
+    # stack tables, for vectorized access
+    table_stack = jnp.stack([eval_tables[k] for k in keys], axis=0)  # shape (num_tables, 2^n) - all tables, all entries
     
     degree = max(len(term) for term in expression)
     t_vals = jnp.arange(degree + 1, dtype=jnp.uint32)
@@ -182,23 +183,29 @@ def sumcheck_32(eval_tables, *, q, expression, challenges, num_rounds):
     claimed_sum = None
     
     for round_idx in range(num_rounds):
-        z_map = {k: tables[k][0::2] for k in keys}
-        o_map = {k: tables[k][1::2] for k in keys}
+        z = table_stack[:, 0::2]  # shape (num_tables, 2^(n-1)) - all tables, even entries
+        o = table_stack[:, 1::2]  # shape (num_tables, 2^(n-1)) - all tables, odd entries
         
         def eval_at_t(t):
-            t_map = {k: mle_update_32(z_map[k], o_map[k], t, q=q) for k in keys}
-            return jnp.sum(eval_expression(expression, t_map, q).astype(jnp.uint64)) % q
+            # vmap mle_update across all tables simultaneously
+            t_stack = jax.vmap(
+                lambda z_row, o_row: mle_update_32(z_row, o_row, t, q=q)
+            )(z, o)
+            
+            return jnp.sum(eval_expression(expression, t_stack, keys, q)) % q
         
-        round_evals = jax.vmap(eval_at_t)(t_vals)  # shape (degree+1,)
+        round_evals = jax.vmap(eval_at_t)(t_vals)
         
         if round_idx == 0:
             claimed_sum = (round_evals[0] + round_evals[1]) % q
         
         all_round_evals.append(round_evals)
         
+        # update table_stack for next round
         r = jnp.uint32(challenges[round_idx])
-        for k in keys:
-            tables[k] = mle_update_32(z_map[k], o_map[k], r, q=q)
+        table_stack = jax.vmap(
+            lambda z_row, o_row: mle_update_32(z_row, o_row, r, q=q)
+        )(z, o)
     
     return claimed_sum, jnp.stack(all_round_evals)
 
@@ -252,14 +259,37 @@ def sumcheck(eval_tables, *, q, expression, challenges, num_rounds, bit_width=32
 
 #     print("=== Case 1: f = a ===")
 #     table_a = jnp.array([0, 1, 2, 3, 4, 5, 6, 7], dtype=jnp.uint32)
-#     challenges = [jnp.uint32(8), jnp.uint32(5), jnp.uint32(11)]  # all 3, r3 is verifier's
+#     challenges = [jnp.uint32(8), jnp.uint32(5), jnp.uint32(11)]
 
 #     claimed_sum, round_evals = sumcheck_32(
 #         {'a': table_a},
 #         q=q,
-#         expression=[['a']],
+#         expression=(('a',),),
 #         challenges=challenges,
 #         num_rounds=3,
 #     )
 #     print(f"claimed_sum: {claimed_sum}")   # expect 11
 #     print(f"round_evals:\n{round_evals}")  # expect [[12,16],[3,7],[1,5]]
+
+#     print("\n=== Case 2: f = a*b ===")
+#     # 2 variables, x1=LSB
+#     # a = x1, b = x2
+#     # idx | (x2,x1) | a | b | a*b
+#     #  0  |  (0,0)  | 0 | 0 |  0
+#     #  1  |  (0,1)  | 1 | 0 |  0
+#     #  2  |  (1,0)  | 0 | 1 |  0
+#     #  3  |  (1,1)  | 1 | 1 |  1
+#     # sum = 1, claimed_sum = 1 mod 17
+#     table_a2 = jnp.array([0, 1, 0, 1], dtype=jnp.uint32)
+#     table_b2 = jnp.array([0, 0, 1, 1], dtype=jnp.uint32)
+#     challenges2 = [jnp.uint32(3), jnp.uint32(7)]  # r1=3, r2=7 (verifier's)
+
+#     claimed_sum2, round_evals2 = sumcheck_32(
+#         {'a': table_a2, 'b': table_b2},
+#         q=q,
+#         expression=(('a', 'b'),),
+#         challenges=challenges2,
+#         num_rounds=2,
+#     )
+#     print(f"claimed_sum: {claimed_sum2}")   # expect 1
+#     print(f"round_evals:\n{round_evals2}")  # each row has 3 values: g(0), g(1), g(2)
