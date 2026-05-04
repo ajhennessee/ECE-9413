@@ -120,7 +120,7 @@ def sumcheck_32(eval_tables, *, q, expression, challenges, num_rounds):
 
     for round_idx in range(num_rounds):
         table_pairs = table_stack.reshape(table_stack.shape[0], -1, 2)
-        z = table_pairs[:, :, 0]
+        z = table_pairs[:, :, 0] # contiguous in memory
         o = table_pairs[:, :, 1]
 
         # vars is outer, t is inner → z/o read once per variable
