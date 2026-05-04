@@ -492,6 +492,7 @@ def _evaluate_and_sum_stacked(expression, t_stacks, key_to_idx, q):
 
 @partial(jax.jit, static_argnames=["q", "expression", "num_rounds"])
 def sumcheck_32(eval_tables, *, q, expression, challenges, num_rounds):
+    # --- Step 1: stack all tables into a single 2D tensor ---
     keys       = tuple(eval_tables.keys())
     key_to_idx = {k: i for i, k in enumerate(keys)}
 
@@ -507,47 +508,38 @@ def sumcheck_32(eval_tables, *, q, expression, challenges, num_rounds):
     all_round_evals = []
 
     for round_idx in range(num_rounds):
-        z = table_stack[:, ::2]    # (num_vars, N//2)
-        o = table_stack[:, 1::2]   # (num_vars, N//2)
+        # Split: (num_vars, N//2) each
+        z = table_stack[:, ::2]
+        o = table_stack[:, 1::2]
+
+        # Diffs once, reused for both t_stacks and the fold below.
+        diffs = mod_sub_32(o, z, q)  # (num_vars, N//2)
+
+        # --- Step 2: broadcast instead of vmap ---
+        # z[:, None, :]        → (num_vars,    1,   N//2)
+        # diffs[:, None, :]    → (num_vars,    1,   N//2)
+        # j_vals[None, :, None]→ (1,       degree+1,   1)
+        # result               → (num_vars, degree+1, N//2)
+        t_stacks = mod_add_32(
+            z[:, None, :],
+            mod_mul_32(diffs[:, None, :], j_vals[None, :, None], q),
+            q,
+        )
+
+        # --- Step 3: composition + reduction in one pass over t_stacks ---
+        all_round_evals.append(
+            _evaluate_and_sum_stacked(expression, t_stacks, key_to_idx, q)
+        )  # appends (degree+1,)
+
+        # Fold: reuse diffs, no separate mle_update_32 call.
         r = challenges[round_idx]
+        table_stack = mod_add_32(z, mod_mul_32(diffs, r, q), q)  # (num_vars, N//2)
 
-        def process_col(z_col, o_col):
-            """One hypercube position: eval contributions at all j + fold value.
+    all_round_evals = jnp.stack(all_round_evals)  # (num_rounds, degree+1)
 
-            z_col, o_col : (num_vars,) uint32
-            returns      : contribs (degree+1,) uint64,  fold_col (num_vars,) uint32
-            """
-            diff = mod_sub_32(o_col, z_col, q)  # (num_vars,)
-
-            def eval_at_j(j):
-                t_col = mod_add_32(z_col, mod_mul_32(diff, j, q), q)  # (num_vars,)
-                term_vals = []
-                for term in expression:
-                    prod = t_col[key_to_idx[term[0]]]
-                    for var in term[1:]:
-                        prod = mod_mul_32(prod, t_col[key_to_idx[var]], q)
-                    term_vals.append(prod.astype(jnp.uint64))
-                total = term_vals[0]
-                for tv in term_vals[1:]:
-                    total = total + tv
-                return total  # uint64 scalar
-
-            contribs = jax.vmap(eval_at_j)(j_vals)                    # (degree+1,) uint64
-            fold_col = mod_add_32(z_col, mod_mul_32(diff, r, q), q)   # (num_vars,) uint32
-            return contribs, fold_col
-
-        # vmap over N//2 positions — both outputs share one read of z/o
-        contribs_all, new_table_T = jax.vmap(process_col)(z.T, o.T)
-        # contribs_all : (N//2, degree+1) uint64
-        # new_table_T  : (N//2, num_vars) uint32
-
-        round_evals = (contribs_all.sum(axis=0) % jnp.uint64(q)).astype(jnp.uint32)
-        all_round_evals.append(round_evals)
-
-        table_stack = new_table_T.T   # (num_vars, N//2)
-
-    all_round_evals = jnp.stack(all_round_evals)   # (num_rounds, degree+1)
+    # Derive claim0 from round 0 — no separate full-table pass.
     claim0 = mod_add_32(all_round_evals[0, 0], all_round_evals[0, 1], q)
+
     return claim0, all_round_evals
 
 
