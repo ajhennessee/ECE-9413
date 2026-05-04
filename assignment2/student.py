@@ -19,18 +19,39 @@ def get_q_inv(q):
     q_inv = pow(q, -1, r)
     return jnp.uint32((r - q_inv) % r)
 
+# def mont_mul_32(a, b, q, q_inv):
+#     """Montgomery multiplication: returns (a * b * R^-1) mod q."""
+#     # a and b are already in Montgomery form (xR mod q)
+#     # This returns (aR * bR * R^-1) = (ab)R mod q
+#     T = a.astype(jnp.uint64) * b.astype(jnp.uint64)
+#     m = (T.astype(jnp.uint32) * q_inv) # T * q_inv mod 2^32
+
+#     # (T + m*q) / 2^32
+#     t = (T + m.astype(jnp.uint64) * q.astype(jnp.uint64)) >> 32
+
+#     # Final conditional subtraction
+#     return jnp.where(t >= q, (t - q).astype(jnp.uint32), t.astype(jnp.uint32))
+
 def mont_mul_32(a, b, q, q_inv):
-    """Montgomery multiplication: returns (a * b * R^-1) mod q."""
-    # a and b are already in Montgomery form (xR mod q)
-    # This returns (aR * bR * R^-1) = (ab)R mod q
     T = a.astype(jnp.uint64) * b.astype(jnp.uint64)
-    m = (T.astype(jnp.uint32) * q_inv) # T * q_inv mod 2^32
-
-    # (T + m*q) / 2^32
-    t = (T + m.astype(jnp.uint64) * q.astype(jnp.uint64)) >> 32
-
-    # Final conditional subtraction
-    return jnp.where(t >= q, (t - q).astype(jnp.uint32), t.astype(jnp.uint32))
+    m = (T.astype(jnp.uint32) * q_inv).astype(jnp.uint32)
+    
+    # Split to avoid uint64 overflow: T + m*q can exceed 2^64
+    # Instead compute (T >> 32) + m*(q >> 32) + carry terms
+    # Simpler: use the fact that we only need (T + m*q) >> 32
+    # which equals (T >> 32) + (m*q) >> 32 + carry from lower 32 bits
+    T_lo = T & jnp.uint64(0xFFFFFFFF)
+    T_hi = T >> 32
+    mq = m.astype(jnp.uint64) * q.astype(jnp.uint64)
+    mq_lo = mq & jnp.uint64(0xFFFFFFFF)
+    mq_hi = mq >> 32
+    
+    carry = (T_lo + mq_lo) >> 32
+    t = T_hi + mq_hi + carry
+    
+    return jnp.where(t >= q.astype(jnp.uint64),
+                        (t - q.astype(jnp.uint64)).astype(jnp.uint32),
+                        t.astype(jnp.uint32))
 
 def to_montgomery(x, q, R_mod_q):
     """Convert standard integer to Montgomery form: x * R mod q."""
@@ -62,6 +83,12 @@ def mod_sub_32(a, b, q):
     b64 = b.astype(jnp.uint64)
     res = jnp.where(a64 >= b64, a64 - b64, a64 + q - b64)
     return res.astype(jnp.uint32)
+
+def mod_mul_32(a, b, q):
+    """Standard modular multiply — required by harness."""
+    a64 = a.astype(jnp.uint64)
+    b64 = b.astype(jnp.uint64)
+    return ((a64 * b64) % q).astype(jnp.uint32)
 
 def mle_update_32_mont(zero_eval, one_eval, target_eval_mont, q, q_inv):
     """MLE update using Montgomery multiplication."""
@@ -156,3 +183,24 @@ def sumcheck(eval_tables, *, q, expression, challenges, num_rounds, bit_width=32
     if int(bit_width) == 32:
         return sumcheck_32(eval_tables, q=q, expression=expression, challenges=challenges, num_rounds=num_rounds)
     raise ValueError(f"Montgomery only implemented for 32-bit. Found bit_width={bit_width}")
+
+# if __name__ == "__main__":
+#     q = 3603169181
+#     q_u32 = jnp.uint32(q)
+#     R_mod_q = jnp.uint32((1 << 32) % q)
+#     q_inv = get_q_inv(q)
+
+#     a = to_montgomery(jnp.array([jnp.uint32(3)]), q_u32, R_mod_q)
+#     b = to_montgomery(jnp.array([jnp.uint32(4)]), q_u32, R_mod_q)
+    
+#     prod_mont = mont_mul_32(a, b, q_u32, q_inv)
+#     prod = from_montgomery(prod_mont, q_u32, q_inv)
+#     print(f"3 * 4 = {prod}")  # expect 12
+    
+#     # Also test a larger product that would overflow
+#     x = to_montgomery(jnp.array([jnp.uint32(999999999)]), q_u32, R_mod_q)
+#     y = to_montgomery(jnp.array([jnp.uint32(999999999)]), q_u32, R_mod_q)
+#     prod2_mont = mont_mul_32(x, y, q_u32, q_inv)
+#     prod2 = from_montgomery(prod2_mont, q_u32, q_inv)
+#     expected = (999999999 * 999999999) % q
+#     print(f"999999999^2 mod q = {prod2}, expected = {expected}")
