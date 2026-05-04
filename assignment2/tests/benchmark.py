@@ -186,7 +186,7 @@ def bench_single(case, expression, runs, warmup):
         )
     )
     
-    print(fn.lower(eval_tables, challenges).compile().as_text())
+    # print(fn.lower(eval_tables, challenges).compile().as_text())
 
     t0 = time.perf_counter()
     out = fn(eval_tables, challenges)
