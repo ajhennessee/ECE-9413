@@ -459,92 +459,88 @@ def _sum_mod_q(values, q):
     return (acc % jnp.uint64(q)).astype(jnp.uint32)
 
 
-def _evaluate_sum_of_products(expression, values_by_name, q):
-    """Evaluate `expression` pointwise on the per-variable arrays.
+def _evaluate_and_sum_stacked(expression, t_stacks, key_to_idx, q):
+    """Evaluate the sum-of-products expression and reduce over the hypercube
+    for every evaluation point simultaneously.
 
-    `expression` is sum-of-products in list[list[str]] form.
-    `values_by_name` is dict[str, array]; arrays must broadcast together.
-    """
-    if not expression:
-        raise ValueError("expression must contain at least one term")
-
-    term_values = []
-    for term in expression:
-        if not term:
-            raise ValueError("expression terms must contain at least one factor")
-        prod = values_by_name[term[0]]
-        for var in term[1:]:
-            prod = mod_mul_32(prod, values_by_name[var], q)
-        term_values.append(prod)
-
-    total = term_values[0]
-    for tv in term_values[1:]:
-        total = mod_add_32(total, tv, q)
-    return total
-
-@partial(jax.jit, static_argnames=["q", "expression", "num_rounds"])
-def sumcheck_32(eval_tables, *, q, expression, challenges, num_rounds):
-    """Compulsory 32-bit sumcheck path.
+    Parameters
+    ----------
+    t_stacks   : (num_vars, degree+1, N//2)  uint32
+    key_to_idx : dict[str, int]
+    q          : uint32 modulus
 
     Returns
     -------
-    (claim0, round_evals) : tuple
-        claim0 : uint32 scalar
-            The initial sumcheck claim: sum of `expression` over the full
-            boolean hypercube {0, 1}**num_rounds, reduced mod q.
-        round_evals : list[jax.Array]
-            One entry per round. Entry i is a uint32 array of shape
-            (degree + 1,) holding (g_i(0), g_i(1), ..., g_i(degree)) where
-            g_i is the round-i univariate polynomial.
+    (degree+1,) uint32 — g_i(0), g_i(1), ..., g_i(degree)
     """
-    tables = {
-        name: jnp.asarray(arr, dtype=jnp.uint32)
-        for name, arr in eval_tables.items()
-    }
+    term_tensors = []
+    for term in expression:
+        # Each lookup: (degree+1, N//2)
+        prod = t_stacks[key_to_idx[term[0]]]
+        for var in term[1:]:
+            prod = mod_mul_32(prod, t_stacks[key_to_idx[var]], q)
+        term_tensors.append(prod)
+
+    total = term_tensors[0]
+    for tv in term_tensors[1:]:
+        total = mod_add_32(total, tv, q)
+    # total: (degree+1, N//2)
+
+    # Sum over the hypercube axis; widen to uint64 to prevent overflow.
+    return (total.astype(jnp.uint64).sum(axis=-1) % jnp.uint64(q)).astype(jnp.uint32)
+
+
+@partial(jax.jit, static_argnames=["q", "expression", "num_rounds"])
+def sumcheck_32(eval_tables, *, q, expression, challenges, num_rounds):
+    # --- Step 1: stack all tables into a single 2D tensor ---
+    keys       = tuple(eval_tables.keys())
+    key_to_idx = {k: i for i, k in enumerate(keys)}
+
+    table_stack = jnp.stack(
+        [jnp.asarray(eval_tables[k], dtype=jnp.uint32) for k in keys]
+    )  # (num_vars, N)
+
+    challenges = jnp.asarray(challenges, dtype=jnp.uint32)
 
     degree = max(len(term) for term in expression)
-    num_eval_points = degree + 1
-    j_vals = jnp.arange(num_eval_points, dtype=jnp.uint32)
+    j_vals = jnp.arange(degree + 1, dtype=jnp.uint32)  # (degree+1,)
 
-    initial_combined = _evaluate_sum_of_products(expression, tables, q)
-    claim0 = _sum_mod_q(initial_combined, q)
-
-    round_evals = []
+    all_round_evals = []
 
     for round_idx in range(num_rounds):
-        zero_halves = {name: t[::2] for name, t in tables.items()}
-        one_halves  = {name: t[1::2] for name, t in tables.items()}
+        # Split: (num_vars, N//2) each
+        z = table_stack[:, ::2]
+        o = table_stack[:, 1::2]
 
-        # Compute diff once per table per round; shared across all j evaluations.
-        diffs = {
-            name: mod_sub_32(one_halves[name], zero_halves[name], q)
-            for name in tables
-        }
+        # Diffs once, reused for both t_stacks and the fold below.
+        diffs = mod_sub_32(o, z, q)  # (num_vars, N//2)
 
-        def eval_at_j(j):
-            # T(j) = T0 + j*(T1 - T0), correct for all j including 0 and 1.
-            tables_at_j = {
-                name: mod_add_32(zero_halves[name], mod_mul_32(diffs[name], j, q), q)
-                for name in tables
-            }
-            combined = _evaluate_sum_of_products(expression, tables_at_j, q)
-            return _sum_mod_q(combined, q)
+        # --- Step 2: broadcast instead of vmap ---
+        # z[:, None, :]        → (num_vars,    1,   N//2)
+        # diffs[:, None, :]    → (num_vars,    1,   N//2)
+        # j_vals[None, :, None]→ (1,       degree+1,   1)
+        # result               → (num_vars, degree+1, N//2)
+        t_stacks = mod_add_32(
+            z[:, None, :],
+            mod_mul_32(diffs[:, None, :], j_vals[None, :, None], q),
+            q,
+        )
 
-        # Vectorise over all j values in a single fused kernel.
-        round_evals.append(jax.vmap(eval_at_j)(j_vals))
+        # --- Step 3: composition + reduction in one pass over t_stacks ---
+        all_round_evals.append(
+            _evaluate_and_sum_stacked(expression, t_stacks, key_to_idx, q)
+        )  # appends (degree+1,)
 
+        # Fold: reuse diffs, no separate mle_update_32 call.
         r = challenges[round_idx]
-        tables = {
-            name: mle_update_32(zero_halves[name], one_halves[name], r, q=q)
-            for name in tables
-        }
+        table_stack = mod_add_32(z, mod_mul_32(diffs, r, q), q)  # (num_vars, N//2)
 
-    if round_evals:
-        round_evals_array = jnp.stack(round_evals)
-    else:
-        round_evals_array = jnp.zeros((0, num_eval_points), dtype=jnp.uint32)
+    all_round_evals = jnp.stack(all_round_evals)  # (num_rounds, degree+1)
 
-    return claim0, round_evals_array
+    # Derive claim0 from round 0 — no separate full-table pass.
+    claim0 = mod_add_32(all_round_evals[0, 0], all_round_evals[0, 1], q)
+
+    return claim0, all_round_evals
 
 
 def _table_at_point_64(zero_half, one_half, j, q):
