@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import jax
 import jax.numpy as jnp
+from functools import partial
 
 jax.config.update("jax_enable_x64", True)
 
@@ -481,7 +482,7 @@ def _evaluate_sum_of_products(expression, values_by_name, q):
         total = mod_add_32(total, tv, q)
     return total
 
-
+@partial(jax.jit, static_argnames=["q", "expression", "num_rounds"])
 def sumcheck_32(eval_tables, *, q, expression, challenges, num_rounds):
     """Compulsory 32-bit sumcheck path.
 
@@ -500,42 +501,37 @@ def sumcheck_32(eval_tables, *, q, expression, challenges, num_rounds):
         name: jnp.asarray(arr, dtype=jnp.uint32)
         for name, arr in eval_tables.items()
     }
-    challenges = jnp.asarray(challenges, dtype=jnp.uint32)
-
-    if not tables:
-        raise ValueError("eval_tables must be non-empty")
-    if not expression:
-        raise ValueError("expression must be non-empty")
 
     degree = max(len(term) for term in expression)
     num_eval_points = degree + 1
+    j_vals = jnp.arange(num_eval_points, dtype=jnp.uint32)
 
-    # Initial claim: sum over the entire hypercube of the expression. This is
-    # what the prover commits to at the start of the protocol; in any honest
-    # run it equals g_0(0) + g_0(1) of the first round polynomial.
     initial_combined = _evaluate_sum_of_products(expression, tables, q)
     claim0 = _sum_mod_q(initial_combined, q)
 
     round_evals = []
 
     for round_idx in range(num_rounds):
-        # LSB-first binding: the round variable is the least significant bit
-        # of the current hypercube index, so even indices are x_i = 0 and odd
-        # indices are x_i = 1. After folding, what was the next bit up
-        # becomes the new LSB, so the same split applies in every round.
         zero_halves = {name: t[::2] for name, t in tables.items()}
-        one_halves = {name: t[1::2] for name, t in tables.items()}
+        one_halves  = {name: t[1::2] for name, t in tables.items()}
 
-        evals_at_j = []
-        for j in range(num_eval_points):
+        # Compute diff once per table per round; shared across all j evaluations.
+        diffs = {
+            name: mod_sub_32(one_halves[name], zero_halves[name], q)
+            for name in tables
+        }
+
+        def eval_at_j(j):
+            # T(j) = T0 + j*(T1 - T0), correct for all j including 0 and 1.
             tables_at_j = {
-                name: _table_at_point(zero_halves[name], one_halves[name], j, q)
+                name: mod_add_32(zero_halves[name], mod_mul_32(diffs[name], j, q), q)
                 for name in tables
             }
             combined = _evaluate_sum_of_products(expression, tables_at_j, q)
-            evals_at_j.append(_sum_mod_q(combined, q))
+            return _sum_mod_q(combined, q)
 
-        round_evals.append(jnp.stack(evals_at_j))
+        # Vectorise over all j values in a single fused kernel.
+        round_evals.append(jax.vmap(eval_at_j)(j_vals))
 
         r = challenges[round_idx]
         tables = {
@@ -548,7 +544,7 @@ def sumcheck_32(eval_tables, *, q, expression, challenges, num_rounds):
     else:
         round_evals_array = jnp.zeros((0, num_eval_points), dtype=jnp.uint32)
 
-    return (claim0, round_evals_array)
+    return claim0, round_evals_array
 
 
 def _table_at_point_64(zero_half, one_half, j, q):
@@ -665,6 +661,9 @@ def sumcheck_128(eval_tables, *, q, expression, challenges, num_rounds):
 
 def sumcheck(eval_tables, *, q, expression, challenges, num_rounds, bit_width=32):
     """Frozen dispatcher entrypoint used by the harness."""
+    expression = tuple(tuple(term) for term in expression)
+    q = int(q)
+    
     if int(bit_width) == 32:
         return sumcheck_32(
             eval_tables,
