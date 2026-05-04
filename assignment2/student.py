@@ -1,323 +1,152 @@
-"""
-Assignment 2 student implementation reference skeleton.
-
-This file documents the frozen student-facing API.
-Only 32-bit kernels are compulsory in the base track.
-64-bit and 128-bit kernels are intentionally left unimplemented here.
-"""
-
-from __future__ import annotations
-
-from pprint import pprint
 import jax
 import jax.numpy as jnp
 from functools import partial
+
 jax.config.update("jax_enable_x64", True)
 
+# -----------------------------------------------------------------------------
+# Montgomery Helpers
+# -----------------------------------------------------------------------------
+
+def get_q_inv(q):
+    """Compute q_inv = -q^{-1} mod 2^32."""
+    q = int(q)
+    # Modular inverse using Newton's method for 2^k
+    t = 0
+    new_t = 1
+    r = 1 << 32
+    # Standard modular inverse
+    q_inv = pow(q, -1, r)
+    return jnp.uint32((r - q_inv) % r)
+
+def mont_mul_32(a, b, q, q_inv):
+    """Montgomery multiplication: returns (a * b * R^-1) mod q."""
+    # a and b are already in Montgomery form (xR mod q)
+    # This returns (aR * bR * R^-1) = (ab)R mod q
+    T = a.astype(jnp.uint64) * b.astype(jnp.uint64)
+    m = (T.astype(jnp.uint32) * q_inv) # T * q_inv mod 2^32
+
+    # (T + m*q) / 2^32
+    t = (T + m.astype(jnp.uint64) * q.astype(jnp.uint64)) >> 32
+
+    # Final conditional subtraction
+    return jnp.where(t >= q, (t - q).astype(jnp.uint32), t.astype(jnp.uint32))
+
+def to_montgomery(x, q, R_mod_q):
+    """Convert standard integer to Montgomery form: x * R mod q."""
+    # We use standard mod here as it's a one-time setup cost
+    return ((x.astype(jnp.uint64) * R_mod_q.astype(jnp.uint64)) % q.astype(jnp.uint64)).astype(jnp.uint32)
+
+def from_montgomery(x_bar, q, q_inv):
+    """Convert Montgomery form back to standard: x_bar * R^-1 mod q."""
+    # This is just a Montgomery reduction against 1
+    T = x_bar.astype(jnp.uint64)
+    m = (T.astype(jnp.uint32) * q_inv)
+    t = (T + m.astype(jnp.uint64) * q.astype(jnp.uint64)) >> 32
+    return jnp.where(t >= q, (t - q).astype(jnp.uint32), t.astype(jnp.uint32))
 
 # -----------------------------------------------------------------------------
-# 32-bit primitives (compulsory)
+# Modular Arithmetic (Montgomery Compatible)
 # -----------------------------------------------------------------------------
 
 def mod_add_32(a, b, q):
-    """Return (a + b) mod q for the 32-bit track."""
-    q64 = jnp.asarray(q, dtype=jnp.uint64)
-    return ((a.astype(jnp.uint64) + b.astype(jnp.uint64)) % q64).astype(jnp.uint32)
-
-
-# def mod_sub_32(a, b, q):
-#     """Return (a - b) mod q for the 32-bit track."""
-#     a64 = a.astype(jnp.int64)
-#     b64 = b.astype(jnp.int64)
-#     return ((a64 - b64) % q).astype(jnp.uint32)
+    """(a + b) mod q. Works same in Montgomery and Standard domain."""
+    res = a + b
+    return jnp.where(res >= q, res - q, res)
 
 def mod_sub_32(a, b, q):
-    """Return (a - b) mod q for the 32-bit track."""
-    q32 = jnp.asarray(q, dtype=jnp.uint32)
-    return jnp.where(a >= b, a - b, a + q32 - b).astype(jnp.uint32)
+    """(a - b) mod q. Works same in Montgomery and Standard domain."""
+    return jnp.where(a >= b, a - b, a + q - b)
 
-
-def mod_mul_32(a, b, q):
-    """Return (a * b) mod q for the 32-bit track."""
-    q64 = jnp.asarray(q, dtype=jnp.uint64)
-    return ((a.astype(jnp.uint64) * b.astype(jnp.uint64)) % q64).astype(jnp.uint32)
-
-
-# # -----------------------------------------------------------------------------
-# # 64-bit primitives (optional, left for future implementation)
-# # -----------------------------------------------------------------------------
-
-# def mod_add_64(a, b, q):
-#     """Optional 64-bit modular add kernel."""
-#     # TODO(student): implement when enabling 64-bit track.
-#     raise NotImplementedError
-
-
-# def mod_sub_64(a, b, q):
-#     """Optional 64-bit modular subtract kernel."""
-#     # TODO(student): implement when enabling 64-bit track.
-#     raise NotImplementedError
-
-
-# def mod_mul_64(a, b, q):
-#     """Optional 64-bit modular multiply kernel."""
-#     # TODO(student): implement when enabling 64-bit track.
-#     raise NotImplementedError
-
-
-# # -----------------------------------------------------------------------------
-# # 128-bit primitives (optional, left for future implementation)
-# # -----------------------------------------------------------------------------
-
-# def mod_add_128(a, b, q):
-#     """Optional 128-bit modular add kernel."""
-#     # TODO(student): implement when enabling 128-bit track.
-#     raise NotImplementedError
-
-
-# def mod_sub_128(a, b, q):
-#     """Optional 128-bit modular subtract kernel."""
-#     # TODO(student): implement when enabling 128-bit track.
-#     raise NotImplementedError
-
-
-# def mod_mul_128(a, b, q):
-#     """Optional 128-bit modular multiply kernel."""
-#     # TODO(student): implement when enabling 128-bit track.
-#     raise NotImplementedError
-
-
-# -----------------------------------------------------------------------------
-# Frozen dispatch API
-# -----------------------------------------------------------------------------
-
-# def mod_add(a, b, q, *, bit_width=32):
-#     if int(bit_width) == 32:
-#         return mod_add_32(a, b, q)
-#     if int(bit_width) == 64:
-#         return mod_add_64(a, b, q)
-#     if int(bit_width) == 128:
-#         return mod_add_128(a, b, q)
-#     raise ValueError(f"Unsupported bit_width={bit_width}")
-
-
-# def mod_sub(a, b, q, *, bit_width=32):
-#     if int(bit_width) == 32:
-#         return mod_sub_32(a, b, q)
-#     if int(bit_width) == 64:
-#         return mod_sub_64(a, b, q)
-#     if int(bit_width) == 128:
-#         return mod_sub_128(a, b, q)
-#     raise ValueError(f"Unsupported bit_width={bit_width}")
-
-
-# def mod_mul(a, b, q, *, bit_width=32):
-#     if int(bit_width) == 32:
-#         return mod_mul_32(a, b, q)
-#     if int(bit_width) == 64:
-#         return mod_mul_64(a, b, q)
-#     if int(bit_width) == 128:
-#         return mod_mul_128(a, b, q)
-#     raise ValueError(f"Unsupported bit_width={bit_width}")
-
-
-# def mod_mul_small_t_32(x, t, q, max_t):
-#     """Return (x * t) mod q for small t = 0..max_t."""
-#     out = jnp.zeros_like(x, dtype=jnp.uint32)
-
-#     for i in range(max_t + 1):
-#         out = jnp.where(
-#             i < t,
-#             mod_add_32(out, x, q),
-#             out,
-#         )
-
-#     return out
-
-
-# def mle_update_32_small_t(zero_eval, one_eval, target_eval, *, q, max_t):
-#     """MLE update optimized for small target_eval values."""
-#     diff = mod_sub_32(one_eval, zero_eval, q)
-#     prod = mod_mul_small_t_32(diff, target_eval, q, max_t)
-#     return mod_add_32(zero_eval, prod, q)
-
-
-def mle_update_32(zero_eval, one_eval, target_eval, *, q):
-    """Compulsory 32-bit MLE update."""
+def mle_update_32_mont(zero_eval, one_eval, target_eval_mont, q, q_inv):
+    """MLE update using Montgomery multiplication."""
     diff = mod_sub_32(one_eval, zero_eval, q)
-    prod = mod_mul_32(diff, target_eval, q)
+    # target_eval_mont must be in Montgomery form
+    prod = mont_mul_32(diff, target_eval_mont, q, q_inv)
     return mod_add_32(zero_eval, prod, q)
 
+# -----------------------------------------------------------------------------
+# Sumcheck Core
+# -----------------------------------------------------------------------------
 
-# def mle_update_64(zero_eval, one_eval, target_eval, *, q):
-#     """Optional 64-bit MLE update."""
-#     # TODO(student): implement when enabling 64-bit track.
-#     raise NotImplementedError
+def compute_composition_mont(expression, t_stack, key_to_idx, q, q_inv, R_mod_q):
+    """Composition using Montgomery multiplication."""
+    # Montgomery 0 is 0
+    acc = jnp.zeros(t_stack.shape[1], dtype=jnp.uint32)
 
-
-# def mle_update_128(zero_eval, one_eval, target_eval, *, q):
-#     """Optional 128-bit MLE update."""
-#     # TODO(student): implement when enabling 128-bit track.
-#     raise NotImplementedError
-
-
-# def mle_update(zero_eval, one_eval, target_eval, *, q, bit_width=32):
-#     if int(bit_width) == 32:
-#         return mle_update_32(zero_eval, one_eval, target_eval, q=q)
-#     if int(bit_width) == 64:
-#         return mle_update_64(zero_eval, one_eval, target_eval, q=q)
-#     if int(bit_width) == 128:
-#         return mle_update_128(zero_eval, one_eval, target_eval, q=q)
-#     raise ValueError(f"Unsupported bit_width={bit_width}")
-
-
-def compute_composition(expression, t_stack, key_to_idx, q):
-    """
-    expression: tuple of tuples e.g. (('a','b'), ('c',))
-    t_stack: shape (num_tables, half) — stacked arrays
-    key_to_idx: dict mapping variable name to index
-    """
-    acc = jnp.zeros(t_stack.shape[1], dtype=jnp.uint64)
-    
     for term in expression:
-        term_val = jnp.ones(t_stack.shape[1], dtype=jnp.uint64)
+        # Montgomery 1 is R mod q
+        term_val = R_mod_q
         for var in term:
-            x = t_stack[key_to_idx[var]].astype(jnp.uint64)
-            term_val = (term_val * x) % q
-        acc = (acc + term_val) % q
-    
+            x = t_stack[key_to_idx[var]]
+            term_val = mont_mul_32(term_val, x, q, q_inv)
+        acc = mod_add_32(acc, term_val, q)
+
     return acc
 
-
-@partial(jax.jit, static_argnames=["expression", "q", "num_rounds"])
+@partial(jax.jit, static_argnames=["expression", "num_rounds"])
 def sumcheck_32(eval_tables, *, q, expression, challenges, num_rounds):
+    q_u32 = jnp.uint32(q)
+    q_inv = get_q_inv(q)
+    R_mod_q = jnp.uint32((1 << 32) % q)
+
     keys = tuple(eval_tables.keys())
     key_to_idx = {k: i for i, k in enumerate(keys)}
 
-    table_stack = jnp.stack(
-        [eval_tables[k] for k in keys],
-        axis=0,
-    )
+    # 1. Convert initial tables to Montgomery form
+    table_stack = jnp.stack([eval_tables[k] for k in keys], axis=0)
+    table_stack = to_montgomery(table_stack, q_u32, R_mod_q)
 
     degree = max(len(term) for term in expression)
-    t_vals = jnp.arange(degree + 1, dtype=jnp.uint32)
-    q64 = jnp.asarray(q, dtype=jnp.uint64)
+    # 2. Prepare t_vals in Montgomery form
+    t_vals_raw = jnp.arange(degree + 1, dtype=jnp.uint32)
+    t_vals_mont = to_montgomery(t_vals_raw, q_u32, R_mod_q)
 
-    all_round_evals = []
+    # 3. Convert challenges to Montgomery form
+    challenges_mont = to_montgomery(challenges.astype(jnp.uint32), q_u32, R_mod_q)
+
+    all_round_evals_mont = []
 
     for round_idx in range(num_rounds):
         z = table_stack[:, 0::2]
         o = table_stack[:, 1::2]
 
-        def eval_at_t(t):
+        def eval_at_t(t_mont):
             t_stack = jax.vmap(
-                lambda z_row, o_row: mle_update_32(z_row, o_row, t, q=q)
-                # lambda z_row, o_row: mle_update_small_t_32(z_row, o_row, t, q=q, max_t=degree)
+                lambda z_row, o_row: mle_update_32_mont(z_row, o_row, t_mont, q_u32, q_inv)
             )(z, o)
 
-            vals = compute_composition(expression, t_stack, key_to_idx, q64)
-            return (jnp.sum(vals) % q64).astype(jnp.uint32)
+            vals = compute_composition_mont(expression, t_stack, key_to_idx, q_u32, q_inv, R_mod_q)
+            # Standard sum is fine, but must mod q at the end of sum
+            # Note: We use uint64 sum to avoid overflow before the mod
+            res = (jnp.sum(vals.astype(jnp.uint64)) % q_u32.astype(jnp.uint64)).astype(jnp.uint32)
+            return res
 
-        round_evals = jax.vmap(eval_at_t)(t_vals)
-        all_round_evals.append(round_evals)
+        round_evals = jax.vmap(eval_at_t)(t_vals_mont)
+        all_round_evals_mont.append(round_evals)
 
-        r = challenges[round_idx].astype(jnp.uint32)
-
+        r_mont = challenges_mont[round_idx]
         table_stack = jax.vmap(
-            lambda z_row, o_row: mle_update_32(z_row, o_row, r, q=q)
+            lambda z_row, o_row: mle_update_32_mont(z_row, o_row, r_mont, q_u32, q_inv)
         )(z, o)
 
-    all_round_evals = jnp.stack(all_round_evals)
+    all_round_evals_mont = jnp.stack(all_round_evals_mont)
 
-    claimed_sum = mod_add_32(
-        all_round_evals[0, 0],
-        all_round_evals[0, 1],
-        q,
+    # 4. Final Claimed Sum (still in Montgomery domain)
+    claimed_sum_mont = mod_add_32(
+        all_round_evals_mont[0, 0],
+        all_round_evals_mont[0, 1],
+        q_u32,
     )
 
-    return claimed_sum, all_round_evals
+    # 5. Convert everything back to standard domain
+    final_claimed_sum = from_montgomery(claimed_sum_mont, q_u32, q_inv)
+    final_round_evals = from_montgomery(all_round_evals_mont, q_u32, q_inv)
 
-
-# def sumcheck_64(eval_tables, *, q, expression, challenges, num_rounds):
-#     """Optional 64-bit sumcheck path."""
-#     # TODO(student): implement when enabling 64-bit track.
-#     raise NotImplementedError
-
-
-# def sumcheck_128(eval_tables, *, q, expression, challenges, num_rounds):
-#     """Optional 128-bit sumcheck path."""
-#     # TODO(student): implement when enabling 128-bit track.
-#     raise NotImplementedError
-
+    return final_claimed_sum, final_round_evals
 
 def sumcheck(eval_tables, *, q, expression, challenges, num_rounds, bit_width=32):
-    """Frozen dispatcher entrypoint used by the harness."""
     expression = tuple(tuple(term) for term in expression)
-    q = int(q)
-    
     if int(bit_width) == 32:
-        return sumcheck_32(
-            eval_tables,
-            q=q,
-            expression=expression,
-            challenges=challenges,
-            num_rounds=num_rounds,
-        )
-    if int(bit_width) == 64:
-        return sumcheck_64(
-            eval_tables,
-            q=q,
-            expression=expression,
-            challenges=challenges,
-            num_rounds=num_rounds,
-        )
-    if int(bit_width) == 128:
-        return sumcheck_128(
-            eval_tables,
-            q=q,
-            expression=expression,
-            challenges=challenges,
-            num_rounds=num_rounds,
-        )
-    raise ValueError(f"Unsupported bit_width={bit_width}")
-
-
-# if __name__ == "__main__":
-#     q = 17
-
-#     print("=== Case 1: f = a ===")
-#     table_a = jnp.array([0, 1, 2, 3, 4, 5, 6, 7], dtype=jnp.uint32)
-#     challenges = [jnp.uint32(8), jnp.uint32(5), jnp.uint32(11)]
-
-#     claimed_sum, round_evals = sumcheck_32(
-#         {'a': table_a},
-#         q=q,
-#         expression=(('a',),),
-#         challenges=challenges,
-#         num_rounds=3,
-#     )
-#     print(f"claimed_sum: {claimed_sum}")   # expect 11
-#     print(f"round_evals:\n{round_evals}")  # expect [[12,16],[3,7],[1,5]]
-
-#     print("\n=== Case 2: f = a*b ===")
-#     # 2 variables, x1=LSB
-#     # a = x1, b = x2
-#     # idx | (x2,x1) | a | b | a*b
-#     #  0  |  (0,0)  | 0 | 0 |  0
-#     #  1  |  (0,1)  | 1 | 0 |  0
-#     #  2  |  (1,0)  | 0 | 1 |  0
-#     #  3  |  (1,1)  | 1 | 1 |  1
-#     # sum = 1, claimed_sum = 1 mod 17
-#     table_a2 = jnp.array([0, 1, 0, 1], dtype=jnp.uint32)
-#     table_b2 = jnp.array([0, 0, 1, 1], dtype=jnp.uint32)
-#     challenges2 = [jnp.uint32(3), jnp.uint32(7)]  # r1=3, r2=7 (verifier's)
-
-#     claimed_sum2, round_evals2 = sumcheck_32(
-#         {'a': table_a2, 'b': table_b2},
-#         q=q,
-#         expression=(('a', 'b'),),
-#         challenges=challenges2,
-#         num_rounds=2,
-#     )
-#     print(f"claimed_sum: {claimed_sum2}")   # expect 1
-#     print(f"round_evals:\n{round_evals2}")  # each row has 3 values: g(0), g(1), g(2)
+        return sumcheck_32(eval_tables, q=q, expression=expression, challenges=challenges, num_rounds=num_rounds)
+    raise ValueError(f"Montgomery only implemented for 32-bit. Found bit_width={bit_width}")
