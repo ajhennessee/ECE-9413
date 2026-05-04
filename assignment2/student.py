@@ -434,32 +434,7 @@ def mle_update(zero_eval, one_eval, target_eval, *, q, bit_width=32):
 #   4. Fold every table with the verifier's challenge r_i via mle_update_32.
 # -----------------------------------------------------------------------------
 
-def _table_at_point(zero_half, one_half, j, q):
-    """Evaluate the linear extension T(j) = T0 + j*(T1 - T0) mod q.
-
-    `j` is a Python int; specialize 0 and 1 to keep the trace tight.
-    """
-    if j == 0:
-        return zero_half
-    if j == 1:
-        return one_half
-    j_arr = jnp.asarray(j, dtype=jnp.uint32)
-    diff = mod_sub_32(one_half, zero_half, q)
-    scaled = mod_mul_32(diff, j_arr, q)
-    return mod_add_32(zero_half, scaled, q)
-
-
-def _sum_mod_q(values, q):
-    """Reduce a 1-D uint32 array mod q.
-
-    Cast to uint64 first so the running sum cannot overflow for any tractable
-    hypercube size (uint64 holds sums of up to ~2**32 uint32 values comfortably).
-    """
-    acc = values.astype(jnp.uint64).sum()
-    return (acc % jnp.uint64(q)).astype(jnp.uint32)
-
-
-def _evaluate_and_sum_stacked(expression, t_stacks, key_to_idx, q):
+def _evaluate_and_sum_stacked_32(expression, t_stacks, key_to_idx, q):
     """Evaluate the sum-of-products expression and reduce over the hypercube
     for every evaluation point simultaneously.
 
@@ -481,13 +456,15 @@ def _evaluate_and_sum_stacked(expression, t_stacks, key_to_idx, q):
             prod = mod_mul_32(prod, t_stacks[key_to_idx[var]], q)
         term_tensors.append(prod)
 
-    total = term_tensors[0]
+    # Accumulate terms in uint64 — skips intermediate mod between terms,
+    # safe since num_terms * (q-1) * N//2 < 2**64 for practical inputs.
+    total = term_tensors[0].astype(jnp.uint64)
     for tv in term_tensors[1:]:
-        total = mod_add_32(total, tv, q)
-    # total: (degree+1, N//2)
+        total = total + tv.astype(jnp.uint64)
+    # total: (degree+1, N//2) uint64
 
-    # Sum over the hypercube axis; widen to uint64 to prevent overflow.
-    return (total.astype(jnp.uint64).sum(axis=-1) % jnp.uint64(q)).astype(jnp.uint32)
+    # Sum over the hypercube axis and reduce mod q in one step.
+    return (total.sum(axis=-1) % jnp.uint64(q)).astype(jnp.uint32)
 
 
 @partial(jax.jit, static_argnames=["q", "expression", "num_rounds"])
@@ -528,7 +505,7 @@ def sumcheck_32(eval_tables, *, q, expression, challenges, num_rounds):
 
         # --- Step 3: composition + reduction in one pass over t_stacks ---
         all_round_evals.append(
-            _evaluate_and_sum_stacked(expression, t_stacks, key_to_idx, q)
+            _evaluate_and_sum_stacked_32(expression, t_stacks, key_to_idx, q)
         )  # appends (degree+1,)
 
         # Fold: reuse diffs, no separate mle_update_32 call.
@@ -543,116 +520,68 @@ def sumcheck_32(eval_tables, *, q, expression, challenges, num_rounds):
     return claim0, all_round_evals
 
 
-def _table_at_point_64(zero_half, one_half, j, q):
-    """64-bit version of _table_at_point: T(j) = T0 + j*(T1 - T0) mod q."""
-    if j == 0:
-        return zero_half
-    if j == 1:
-        return one_half
-    j_arr = jnp.asarray(j, dtype=jnp.uint64)
-    diff = mod_sub_64(one_half, zero_half, q)
-    scaled = mod_mul_64(diff, j_arr, q)
-    return mod_add_64(zero_half, scaled, q)
-
-
-def _sum_mod_q_64(values, q):
-    """Reduce a 1-D uint64 array mod q.
-
-    Unlike the 32-bit case we cannot widen to a native integer type, so
-    fold with mod_add_64 inside a JAX reduction. jnp.add.reduce with a
-    custom op isn't directly available; instead we use a scan-style fold
-    via lax.fori_loop semantics expressed as a Python-side reduction.
-
-    For typical hypercube sizes this is dispatched once per round.
-    """
-    q64 = _u64(q)
-    flat = values.astype(jnp.uint64)
-
-    def body(i, acc):
-        x = flat[i]
-        s = acc + x
-        # If overflow OR s >= q, subtract q.
-        overflowed = s < acc
-        needs_sub = overflowed | (s >= q64)
-        return jnp.where(needs_sub, s - q64, s)
-
-    return jax.lax.fori_loop(0, flat.shape[0], body, jnp.uint64(0))
-
-
-def _evaluate_sum_of_products_64(expression, values_by_name, q):
-    """Evaluate sum-of-products expression with 64-bit kernels."""
-    if not expression:
-        raise ValueError("expression must contain at least one term")
-
-    term_values = []
+def _evaluate_and_sum_stacked_64(expression, t_stacks, key_to_idx, q):
+    term_tensors = []
     for term in expression:
-        if not term:
-            raise ValueError("expression terms must contain at least one factor")
-        prod = values_by_name[term[0]]
+        prod = t_stacks[key_to_idx[term[0]]]
         for var in term[1:]:
-            prod = mod_mul_64(prod, values_by_name[var], q)
-        term_values.append(prod)
+            prod = mod_mul_64(prod, t_stacks[key_to_idx[var]], q)
+        term_tensors.append(prod)
 
-    total = term_values[0]
-    for tv in term_values[1:]:
+    total = term_tensors[0]
+    for tv in term_tensors[1:]:
         total = mod_add_64(total, tv, q)
-    return total
+    # total: (degree+1, N//2)
+
+    def add_mod(a, b):
+        # q is a Python int — safe to close over.
+        # _u64(q) is computed fresh inside lax.reduce's tracing context.
+        q64 = _u64(q)
+        s = a + b
+        overflowed = s < a
+        return jnp.where(overflowed | (s >= q64), s - q64, s)
+
+    return jax.lax.reduce(total, jnp.uint64(0), add_mod, dimensions=[1])
 
 
+@partial(jax.jit, static_argnames=["q", "expression", "num_rounds"])
 def sumcheck_64(eval_tables, *, q, expression, challenges, num_rounds):
-    """64-bit sumcheck path. Mirrors sumcheck_32 but routes through 64-bit kernels."""
-    tables = {
-        name: jnp.asarray(arr, dtype=jnp.uint64)
-        for name, arr in eval_tables.items()
-    }
+    keys       = tuple(eval_tables.keys())
+    key_to_idx = {k: i for i, k in enumerate(keys)}
+
+    table_stack = jnp.stack(
+        [jnp.asarray(eval_tables[k], dtype=jnp.uint64) for k in keys]
+    )  # (num_vars, N)
+
     challenges = jnp.asarray(challenges, dtype=jnp.uint64)
 
-    if not tables:
-        raise ValueError("eval_tables must be non-empty")
-    if not expression:
-        raise ValueError("expression must be non-empty")
-
     degree = max(len(term) for term in expression)
-    num_eval_points = degree + 1
+    j_vals = jnp.arange(degree + 1, dtype=jnp.uint64)
 
-    initial_combined = _evaluate_sum_of_products_64(expression, tables, q)
-    claim0 = _sum_mod_q_64(initial_combined, q)
-
-    round_evals = []
+    all_round_evals = []
 
     for round_idx in range(num_rounds):
-        zero_halves = {name: t[::2] for name, t in tables.items()}
-        one_halves = {name: t[1::2] for name, t in tables.items()}
+        z     = table_stack[:, ::2]    # (num_vars, N//2)
+        o     = table_stack[:, 1::2]   # (num_vars, N//2)
+        diffs = mod_sub_64(o, z, q)    # (num_vars, N//2)
 
-        evals_at_j = []
-        for j in range(num_eval_points):
-            tables_at_j = {
-                name: _table_at_point_64(zero_halves[name], one_halves[name], j, q)
-                for name in tables
-            }
-            combined = _evaluate_sum_of_products_64(expression, tables_at_j, q)
-            evals_at_j.append(_sum_mod_q_64(combined, q))
+        t_stacks = mod_add_64(
+            z[:, None, :],
+            mod_mul_64(diffs[:, None, :], j_vals[None, :, None], q),
+            q,
+        )  # (num_vars, degree+1, N//2)
 
-        round_evals.append(jnp.stack(evals_at_j))
+        all_round_evals.append(
+            _evaluate_and_sum_stacked_64(expression, t_stacks, key_to_idx, q)
+        )
 
         r = challenges[round_idx]
-        tables = {
-            name: mle_update_64(zero_halves[name], one_halves[name], r, q=q)
-            for name in tables
-        }
+        table_stack = mod_add_64(z, mod_mul_64(diffs, r, q), q)  # (num_vars, N//2)
 
-    if round_evals:
-        round_evals_array = jnp.stack(round_evals)
-    else:
-        round_evals_array = jnp.zeros((0, num_eval_points), dtype=jnp.uint64)
+    all_round_evals = jnp.stack(all_round_evals)  # (num_rounds, degree+1)
 
-    return (claim0, round_evals_array)
-
-
-def sumcheck_128(eval_tables, *, q, expression, challenges, num_rounds):
-    """Optional 128-bit sumcheck path."""
-    # TODO(student): implement when enabling 128-bit track.
-    raise NotImplementedError
+    claim0 = mod_add_64(all_round_evals[0, 0], all_round_evals[0, 1], q)
+    return claim0, all_round_evals
 
 
 def sumcheck(eval_tables, *, q, expression, challenges, num_rounds, bit_width=32):
