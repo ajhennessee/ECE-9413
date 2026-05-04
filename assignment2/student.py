@@ -12,8 +12,8 @@ def get_q_inv(q):
     """Compute q_inv = -q^{-1} mod 2^32."""
     q = int(q)
     # Modular inverse using Newton's method for 2^k
-    t = 0
-    new_t = 1
+    # t = 0
+    # new_t = 1
     r = 1 << 32
     # Standard modular inverse
     q_inv = pow(q, -1, r)
@@ -51,12 +51,17 @@ def from_montgomery(x_bar, q, q_inv):
 
 def mod_add_32(a, b, q):
     """(a + b) mod q. Works same in Montgomery and Standard domain."""
-    res = a + b
-    return jnp.where(res >= q, res - q, res)
+    a64 = a.astype(jnp.uint64)
+    b64 = b.astype(jnp.uint64)
+    res = a64 + b64
+    return jnp.where(res >= q, res - q, res).astype(jnp.uint32)
 
 def mod_sub_32(a, b, q):
     """(a - b) mod q. Works same in Montgomery and Standard domain."""
-    return jnp.where(a >= b, a - b, a + q - b)
+    a64 = a.astype(jnp.uint64)
+    b64 = b.astype(jnp.uint64)
+    res = jnp.where(a64 >= b64, a64 - b64, a64 + q - b64)
+    return res.astype(jnp.uint32)
 
 def mle_update_32_mont(zero_eval, one_eval, target_eval_mont, q, q_inv):
     """MLE update using Montgomery multiplication."""
@@ -84,7 +89,7 @@ def compute_composition_mont(expression, t_stack, key_to_idx, q, q_inv, R_mod_q)
 
     return acc
 
-@partial(jax.jit, static_argnames=["expression", "num_rounds"])
+@partial(jax.jit, static_argnames=["q", "expression", "num_rounds"])
 def sumcheck_32(eval_tables, *, q, expression, challenges, num_rounds):
     q_u32 = jnp.uint32(q)
     q_inv = get_q_inv(q)
@@ -147,6 +152,7 @@ def sumcheck_32(eval_tables, *, q, expression, challenges, num_rounds):
 
 def sumcheck(eval_tables, *, q, expression, challenges, num_rounds, bit_width=32):
     expression = tuple(tuple(term) for term in expression)
+    q = int(q)
     if int(bit_width) == 32:
         return sumcheck_32(eval_tables, q=q, expression=expression, challenges=challenges, num_rounds=num_rounds)
     raise ValueError(f"Montgomery only implemented for 32-bit. Found bit_width={bit_width}")
