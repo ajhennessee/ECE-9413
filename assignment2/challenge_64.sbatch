@@ -19,19 +19,19 @@ singularity exec --nv \
     /bin/bash -c "
         source /ext3/env.sh
         echo 'EAGER, 64, 16'
-        uv run python -m tests.benchmark_EAGER --bench --bits 64 --num-vars 16 --runs 20 --warmup 3 --enable-challenge64
+        uv run python -m tests.benchmark_EAGER --bench --bits 64 --num-vars 16 --runs 20 --warmup 3 --enable-challenge64 2>&1
         echo 'VECT, 64, 16'
-        uv run python -m tests.benchmark_VECT --bench --bits 64 --num-vars 16 --runs 20 --warmup 3 --enable-challenge64
+        uv run python -m tests.benchmark_VECT --bench --bits 64 --num-vars 16 --runs 20 --warmup 3 --enable-challenge64 2>&1
         echo 'MONT, 64, 16'
-        uv run python -m tests.benchmark_MONT --bench --bits 64 --num-vars 16 --runs 20 --warmup 3 --enable-challenge64
+        uv run python -m tests.benchmark_MONT --bench --bits 64 --num-vars 16 --runs 20 --warmup 3 --enable-challenge64 2>&1
         echo 'COMB, 64, 16'
-        uv run python -m tests.benchmark_COMB --bench --bits 64 --num-vars 16 --runs 20 --warmup 3 --enable-challenge64
+        uv run python -m tests.benchmark_COMB --bench --bits 64 --num-vars 16 --runs 20 --warmup 3 --enable-challenge64 2>&1
         echo 'EAGER, 64, 20'
-        uv run python -m tests.benchmark_EAGER --bench --bits 64 --num-vars 20 --runs 20 --warmup 3 --enable-challenge64
+        uv run python -m tests.benchmark_EAGER --bench --bits 64 --num-vars 20 --runs 20 --warmup 3 --enable-challenge64 2>&1
         echo 'VECT, 64, 20'
-        uv run python -m tests.benchmark_VECT --bench --bits 64 --num-vars 20 --runs 20 --warmup 3 --enable-challenge64
+        uv run python -m tests.benchmark_VECT --bench --bits 64 --num-vars 20 --runs 20 --warmup 3 --enable-challenge64 2>&1
         echo 'MONT, 64, 20'
-        uv run python -m tests.benchmark_MONT --bench --bits 64 --num-vars 20 --runs 20 --warmup 3 --enable-challenge64
+        uv run python -m tests.benchmark_MONT --bench --bits 64 --num-vars 20 --runs 20 --warmup 3 --enable-challenge64 2>&1
         echo 'COMB, 64, 20'
-        uv run python -m tests.benchmark_COMB --bench --bits 64 --num-vars 20 --runs 20 --warmup 3 --enable-challenge64
+        uv run python -m tests.benchmark_COMB --bench --bits 64 --num-vars 20 --runs 20 --warmup 3 --enable-challenge64 2>&1
     "

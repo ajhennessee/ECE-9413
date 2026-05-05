@@ -2,7 +2,7 @@
 
 # --- Slurm Directives ---
 #SBATCH --job-name=core_32             # Give your job a name
-#SBATCH --output=core_32.log          # Standard output and error log
+#SBATCH --output=core_32.log           # Standard output and error log
 #SBATCH --gres=gpu:1                   # Request 1 GPU
 #SBATCH --constraint=h200              # Specific node feature (e.g., l40s, h200)
 #SBATCH --nodes=1                      # Number of nodes
