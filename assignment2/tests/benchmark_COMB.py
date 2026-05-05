@@ -185,6 +185,8 @@ def bench_single(case, expression, runs, warmup):
             bit_width=bit_width,
         )
     )
+    
+    print(fn.lower(eval_tables, challenges).compile().as_text())
 
     t0 = time.perf_counter()
     out = fn(eval_tables, challenges)
