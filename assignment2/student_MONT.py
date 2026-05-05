@@ -1,5 +1,3 @@
-%%writefile student.py
-
 """
 Assignment 2 student implementation reference skeleton.
 
