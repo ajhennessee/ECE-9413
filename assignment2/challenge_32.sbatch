@@ -24,7 +24,7 @@ singularity exec --nv \
         uv run python -m tests.benchmark_VECT --bench --bits 32 --num-vars 16 --runs 20 --warmup 3 --enable-challenge32
         echo 'MONT, 32, 16'
         uv run python -m tests.benchmark_MONT --bench --bits 32 --num-vars 16 --runs 20 --warmup 3 --enable-challenge32
-        echo 'COMB_v2, 32, 16'
+        echo 'COMB, 32, 16'
         uv run python -m tests.benchmark_COMB_v2 --bench --bits 32 --num-vars 16 --runs 20 --warmup 3 --enable-challenge32
         echo 'EAGER, 32, 20'
         uv run python -m tests.benchmark_EAGER --bench --bits 32 --num-vars 20 --runs 20 --warmup 3 --enable-challenge32
@@ -32,6 +32,6 @@ singularity exec --nv \
         uv run python -m tests.benchmark_VECT --bench --bits 32 --num-vars 20 --runs 20 --warmup 3 --enable-challenge32
         echo 'MONT, 32, 20'
         uv run python -m tests.benchmark_MONT --bench --bits 32 --num-vars 20 --runs 20 --warmup 3 --enable-challenge32
-        echo 'COMB_v2, 32, 20'
+        echo 'COMB, 32, 20'
         uv run python -m tests.benchmark_COMB_v2 --bench --bits 32 --num-vars 20 --runs 20 --warmup 3 --enable-challenge32
     "
