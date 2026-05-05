@@ -1,15 +1,15 @@
 #!/bin/bash
 
 # --- Slurm Directives ---
-#SBATCH --job-name=my_gpu_node         # Give your job a name
-#SBATCH --output=batch_32.log          # Standard output and error log
+#SBATCH --job-name=core_32             # Give your job a name
+#SBATCH --output=core_32.log          # Standard output and error log
 #SBATCH --gres=gpu:1                   # Request 1 GPU
 #SBATCH --constraint=h200              # Specific node feature (e.g., l40s, h200)
 #SBATCH --nodes=1                      # Number of nodes
 #SBATCH --ntasks-per-node=1            # Number of tasks
 #SBATCH --cpus-per-task=8              # CPU cores per task
 #SBATCH --mem=20GB                     # Memory limit
-#SBATCH --time=02:00:00                # Time limit (HH:MM:SS)
+#SBATCH --time=12:00:00                # Time limit (HH:MM:SS)
 #SBATCH --account=torch_pr_717_tandon_advanced
 #SBATCH --mail-type=ALL
 #SBATCH --mail-user=ajh9498@nyu.edu
