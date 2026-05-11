@@ -17,6 +17,8 @@ singularity exec \
     /bin/bash -c "
         source /ext3/env.sh
         export JAX_PLATFORMS=cpu
+        echo 'EAGER, CPU, 32, 4'
+        uv run python -m tests.benchmark_EAGER --bench --bits 32 --num-vars 4 --runs 20 --warmup 3 --enable-challenge32 2>&1
         echo 'EAGER, CPU, 32, 16'
         uv run python -m tests.benchmark_EAGER --bench --bits 32 --num-vars 16 --runs 20 --warmup 3 --enable-challenge32 2>&1
         echo 'EAGER, CPU, 32, 20'
